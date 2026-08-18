@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import random
 
 app = FastAPI(
-    title="Classic Car API",
+    title="Apex Car API",
     description="A REST API containing information about 1990s and 2000s cars.",
     version="1.0.0"
 )
