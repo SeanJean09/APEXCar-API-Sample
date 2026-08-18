@@ -408,11 +408,11 @@ def home():
         "message": "Welcome to the Classic Car API!",
         "version": "1.0.0",
         "available_endpoints": [
-            "/cars",
-            "/cars/random",
-            "/cars/random/{count}",
-            "/cars/search",
-            "/cars/{id}"
+            "/api/cars",
+            "/api/cars/random",
+            "/api/cars/random/{count}",
+            "/api/cars/search",
+            "/api/cars/{id}"
         ]
     }
 
