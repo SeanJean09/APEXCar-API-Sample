@@ -412,13 +412,14 @@ def home():
             "/api/cars/random",
             "/api/cars/random/{count}",
             "/api/cars/search",
-            "/api/cars/{id}"
+            "/api/cars/{id}",
+            "/api/premium-cars"
         ]
     }
 
 
 # GET ALL CARS
-@app.get("/cars")
+@app.get("/api/cars")
 def get_cars(
     make: str | None = Query(default=None),
     year: int | None = Query(default=None),
@@ -454,7 +455,7 @@ def get_cars(
 
 
 # GET ONE CAR
-@app.get("/cars/{car_id}")
+@app.get("/api/cars/{car_id}")
 def get_car(car_id: int):
     for car in cars:
         if car["id"] == car_id:
@@ -463,13 +464,13 @@ def get_car(car_id: int):
 
 
 # RANDOM CAR
-@app.get("/cars/random")
+@app.get("/api/cars/random")
 def get_random_car():
     return random.choice(cars)
 
 
 # RANDOM MULTIPLE CARS
-@app.get("/cars/random/{count}")
+@app.get("/api/cars/random/{count}")
 def get_random_cars(count: int):
     if count < 1:
         raise HTTPException(status_code=400, detail="Count must be at least 1.")
@@ -479,7 +480,7 @@ def get_random_cars(count: int):
 
 
 # SEARCH
-@app.get("/cars/search")
+@app.get("/api/cars/search")
 def search_cars(q: str = Query(..., min_length=1)):
     q = q.lower()
     results = []
@@ -500,7 +501,7 @@ def search_cars(q: str = Query(..., min_length=1)):
     }
 
 # PROTECTED ENDPOINT
-@app.get("/premium-cars")
+@app.get("/api/premium-cars")
 def get_premium_cars(
     x_api_key: str | None = Header(default=None)
 ):
