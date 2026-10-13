@@ -3,14 +3,7 @@ import random
 import logging
 from typing import Annotated
 
-from fastapi import (
-    FastAPI,
-    Header,
-    HTTPException,
-    Query,
-    Depends,
-    Request,
-)
+from fastapi import FastAPI, Header, HTTPException, Query, Path, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -772,7 +765,7 @@ def get_random_car(_: None = require_api_key):
     tags=["Random"],
 )
 def get_random_cars(
-    count: int = Query(ge=1, le=len(validated_cars)),
+    count: int = Path(..., ge=1, le=len(validated_cars))
     _: None = require_api_key,
 ):
     return random.sample(validated_cars, count)
