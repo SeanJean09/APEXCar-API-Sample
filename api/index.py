@@ -765,12 +765,10 @@ def get_random_car(_: None = require_api_key):
     tags=["Random"],
 )
 def get_random_cars(
-    count: int = Path(..., ge=1, le=len(validated_cars))
+    count: int = Path(..., ge=1, le=len(validated_cars)),
     _: None = require_api_key,
 ):
     return random.sample(validated_cars, count)
-
-
 # ---------------------------------------------------------
 # AVAILABLE MAKES / BODY TYPES
 # ---------------------------------------------------------
