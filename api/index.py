@@ -1,43 +1,86 @@
-from fastapi import FastAPI, HTTPException, Header, Query
-from fastapi.middleware.cors import CORSMiddleware
+import os
 import random
+import logging
+from typing import Annotated
+
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Depends,
+    Request,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+# ---------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------
+
+API_KEY = os.getenv("APEX_API_KEY", "CLASSIC-CARS-2026")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("apex_car_api")
 
 app = FastAPI(
     title="Apex Car API",
-    description="A REST API containing information about 1990s and 2000s cars.",
-    version="1.0.0"
+    description=(
+        "A REST API containing information about "
+        "1990s and 2000s cars."
+    ),
+    version="2.0.0",
 )
 
 # ---------------------------------------------------------
 # CORS
-# ---------------------------------------------------------
-# This will allow a separate HTML/JavaScript frontend
-# to communicate with this API later.
 # ---------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
 
-# API KEY
-API_KEY = "CLASSIC-CARS-2026"
+# ---------------------------------------------------------
+# PYDANTIC MODELS
+# ---------------------------------------------------------
+
+class Car(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(ge=1)
+    make: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    year: int = Field(ge=1990, le=2009)
+    body_type: str = Field(min_length=1)
+    engine: str = Field(min_length=1)
+    horsepower: int = Field(gt=0)
+    transmission: str = Field(min_length=1)
+    drivetrain: str = Field(min_length=1)
+    fuel_type: str = Field(min_length=1)
+    fuel_economy: str
+    seating_capacity: int = Field(ge=1, le=20)
+    original_msrp: str
+    description: str
+    buyer_notes: str
+    image_url: str
 
 
-def verify_api_key(x_api_key: str | None):
-    """
-    Checks whether the client supplied the correct API key.
-    """
+class CarListResponse(BaseModel):
+    count: int
+    cars: list[Car]
 
-    if x_api_key != API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key."
-        )
 
+class SearchResponse(BaseModel):
+    query: str
+    count: int
+    results: list[Car]
+    
 # CAR DATABASE
 cars = [
     {
@@ -421,117 +464,354 @@ cars = [
     }
 ]
 
-# BASIC ROUTES
-@app.get("/")
-def home():
+def validate_dataset():
+    validated_cars = [Car.model_validate(car) for car in cars]
+
+    ids = [car.id for car in validated_cars]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Car IDs must be unique.")
+
+    return validated_cars
+
+
+# Validate the supplied records immediately.
+validated_cars = validate_dataset()
+
+# ---------------------------------------------------------
+# API KEY AUTHENTICATION
+# ---------------------------------------------------------
+
+def verify_api_key(
+    x_api_key: Annotated[str | None, Header()] = None,
+):
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid API key.",
+            headers={"WWW-Authenticate": "API-Key"},
+        )
+
+
+require_api_key = Depends(verify_api_key)
+
+# ---------------------------------------------------------
+# REQUEST ID / LOGGING
+# ---------------------------------------------------------
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID")
+
+    if not request_id:
+        # Generate an ID for tracing; it is not an auth token.
+        import uuid
+        request_id = str(uuid.uuid4())
+
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+
+    logger.info(
+        "%s %s -> %s [request_id=%s]",
+        request.method,
+        request.url.path,
+        response.status_code,
+        request_id,
+    )
+
+    return response
+
+
+# ---------------------------------------------------------
+# HEALTH CHECKS (PUBLIC)
+# ---------------------------------------------------------
+
+@app.get("/health", tags=["Health"])
+def health_check():
+    return {"status": "healthy"}
+
+
+@app.get("/api/health", tags=["Health"])
+def api_health_check():
     return {
-        "message": "Welcome to the Classic Car API!",
-        "version": "1.0.0",
-        "available_endpoints": [
-            "/api/cars",
-            "/api/cars/random",
-            "/api/cars/random/{count}",
-            "/api/cars/search",
-            "/api/cars/{id}",
-            "/api/premium-cars"
-        ]
+        "status": "healthy",
+        "service": "Apex Car API",
+        "version": app.version,
+        "car_count": len(validated_cars),
     }
 
 
-# GET ALL CARS
-@app.get("/api/cars")
-def get_cars(
-    make: str | None = Query(default=None),
-    year: int | None = Query(default=None),
-    body_type: str | None = Query(default=None)
+# ---------------------------------------------------------
+# HOME / API OVERVIEW (PUBLIC)
+# ---------------------------------------------------------
+
+@app.get("/", tags=["General"])
+def home():
+    return {
+        "message": "Welcome to the Apex Car API!",
+        "version": app.version,
+        "documentation": "/docs",
+        "health": "/health",
+        "api_health": "/api/health",
+        "authentication": "X-API-Key header required for data endpoints",
+        "endpoints": [
+            "/api/v1/cars",
+            "/api/v1/cars/{car_id}",
+            "/api/v1/cars/search",
+            "/api/v1/cars/random",
+            "/api/v1/cars/random/{count}",
+            "/api/v1/makes",
+            "/api/v1/body-types",
+        ],
+    }
+
+
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
+
+def filter_cars(
+    make: str | None = None,
+    year: int | None = None,
+    body_type: str | None = None,
+    drivetrain: str | None = None,
+    fuel_type: str | None = None,
+    transmission: str | None = None,
+    min_horsepower: int | None = None,
+    max_horsepower: int | None = None,
 ):
-    """
-    Returns cars with optional filters.
-    """
-    results = cars
+    results = validated_cars
 
     if make:
         results = [
             car for car in results
-            if car["make"].lower() == make.lower()
+            if car.make.casefold() == make.strip().casefold()
         ]
 
-    if year:
-        results = [
-            car for car in results
-            if car["year"] == year
-        ]
+    if year is not None:
+        results = [car for car in results if car.year == year]
 
     if body_type:
         results = [
             car for car in results
-            if car["body_type"].lower() == body_type.lower()
+            if car.body_type.casefold() == body_type.strip().casefold()
         ]
 
+    if drivetrain:
+        results = [
+            car for car in results
+            if car.drivetrain.casefold() == drivetrain.strip().casefold()
+        ]
+
+    if fuel_type:
+        results = [
+            car for car in results
+            if car.fuel_type.casefold() == fuel_type.strip().casefold()
+        ]
+
+    if transmission:
+        results = [
+            car for car in results
+            if transmission.strip().casefold()
+            in car.transmission.casefold()
+        ]
+
+    if min_horsepower is not None:
+        results = [
+            car for car in results
+            if car.horsepower >= min_horsepower
+        ]
+
+    if max_horsepower is not None:
+        results = [
+            car for car in results
+            if car.horsepower <= max_horsepower
+        ]
+
+    return results
+
+
+def car_list_response(results):
     return {
         "count": len(results),
-        "cars": results
+        "cars": results,
     }
 
 
-# GET ONE CAR
-@app.get("/api/cars/{car_id}")
-def get_car(car_id: int):
-    for car in cars:
-        if car["id"] == car_id:
-            return car
-    raise HTTPException(status_code=404, detail="Car not found.")
+# ---------------------------------------------------------
+# GET ALL / FILTER CARS
+# Both versioned and legacy routes are supported.
+# ---------------------------------------------------------
 
-
-# RANDOM CAR
-@app.get("/api/cars/random")
-def get_random_car():
-    return random.choice(cars)
-
-
-# RANDOM MULTIPLE CARS
-@app.get("/api/cars/random/{count}")
-def get_random_cars(count: int):
-    if count < 1:
-        raise HTTPException(status_code=400, detail="Count must be at least 1.")
-    if count > len(cars):
-        raise HTTPException(status_code=400, detail=f"Maximum number of cars is {len(cars)}.")
-    return random.sample(cars, count)
-
-
-# SEARCH
-@app.get("/api/cars/search")
-def search_cars(q: str = Query(..., min_length=1)):
-    q = q.lower()
-    results = []
-    for car in cars:
-        searchable_text = (
-            f"{car['make']} "
-            f"{car['model']} "
-            f"{car['year']} "
-            f"{car['body_type']} "
-            f"{car['engine']}"
-        ).lower()
-        if q in searchable_text:
-            results.append(car)
-    return {
-        "query": q,
-        "count": len(results),
-        "results": results
-    }
-
-# PROTECTED ENDPOINT
-@app.get("/api/premium-cars")
-def get_premium_cars(
-    x_api_key: str | None = Header(default=None)
+@app.get("/api/cars", response_model=CarListResponse, tags=["Cars"])
+@app.get("/api/v1/cars", response_model=CarListResponse, tags=["Cars"])
+def get_cars(
+    _: None = require_api_key,
+    make: str | None = Query(default=None, min_length=1),
+    year: int | None = Query(default=None, ge=1990, le=2009),
+    body_type: str | None = Query(default=None, min_length=1),
+    drivetrain: str | None = Query(default=None, min_length=1),
+    fuel_type: str | None = Query(default=None, min_length=1),
+    transmission: str | None = Query(default=None, min_length=1),
+    min_horsepower: int | None = Query(default=None, ge=1),
+    max_horsepower: int | None = Query(default=None, ge=1),
+    sort_by: str = Query(
+        default="id",
+        pattern="^(id|make|model|year|horsepower|seating_capacity)$",
+    ),
+    order: str = Query(default="asc", pattern="^(asc|desc)$"),
 ):
+    if (
+        min_horsepower is not None
+        and max_horsepower is not None
+        and min_horsepower > max_horsepower
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="min_horsepower cannot exceed max_horsepower.",
+        )
 
-    verify_api_key(x_api_key)
+    results = filter_cars(
+        make=make,
+        year=year,
+        body_type=body_type,
+        drivetrain=drivetrain,
+        fuel_type=fuel_type,
+        transmission=transmission,
+        min_horsepower=min_horsepower,
+        max_horsepower=max_horsepower,
+    )
+
+    results = sorted(
+        results,
+        key=lambda car: getattr(car, sort_by),
+        reverse=(order == "desc"),
+    )
+
+    return car_list_response(results)
+
+
+# ---------------------------------------------------------
+# SEARCH ACROSS MULTIPLE FIELDS
+# Register before /{car_id}.
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/cars/search",
+    response_model=SearchResponse,
+    tags=["Search"],
+)
+@app.get(
+    "/api/v1/cars/search",
+    response_model=SearchResponse,
+    tags=["Search"],
+)
+def search_cars(
+    q: str = Query(..., min_length=1, max_length=100),
+    _: None = require_api_key,
+):
+    query = " ".join(q.split()).casefold()
+
+    if not query:
+        raise HTTPException(
+            status_code=422,
+            detail="Search query cannot be blank.",
+        )
+
+    results = []
+
+    for car in validated_cars:
+        searchable_text = " ".join([
+            car.make,
+            car.model,
+            str(car.year),
+            car.body_type,
+            car.engine,
+            str(car.horsepower),
+            car.transmission,
+            car.drivetrain,
+            car.fuel_type,
+            car.fuel_economy,
+            str(car.seating_capacity),
+            car.original_msrp,
+            car.description,
+            car.buyer_notes,
+        ]).casefold()
+
+        if query in searchable_text:
+            results.append(car)
 
     return {
-        "message": "Authenticated successfully.",
-        "cars": [
-            car for car in cars
-            if car["horsepower"] >= 250
-        ]
+        "query": q.strip(),
+        "count": len(results),
+        "results": results,
     }
+
+
+# ---------------------------------------------------------
+# RANDOM CAR
+# ---------------------------------------------------------
+
+@app.get("/api/cars/random", response_model=Car, tags=["Random"])
+@app.get("/api/v1/cars/random", response_model=Car, tags=["Random"])
+def get_random_car(_: None = require_api_key):
+    return random.choice(validated_cars)
+
+
+# ---------------------------------------------------------
+# RANDOM MULTIPLE CARS
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/cars/random/{count}",
+    response_model=list[Car],
+    tags=["Random"],
+)
+@app.get(
+    "/api/v1/cars/random/{count}",
+    response_model=list[Car],
+    tags=["Random"],
+)
+def get_random_cars(
+    count: int = Query(ge=1, le=len(validated_cars)),
+    _: None = require_api_key,
+):
+    return random.sample(validated_cars, count)
+
+
+# ---------------------------------------------------------
+# AVAILABLE MAKES / BODY TYPES
+# ---------------------------------------------------------
+
+@app.get("/api/makes", tags=["Metadata"])
+@app.get("/api/v1/makes", tags=["Metadata"])
+def get_makes(_: None = require_api_key):
+    makes = sorted({car.make for car in validated_cars})
+    return {"count": len(makes), "makes": makes}
+
+
+@app.get("/api/body-types", tags=["Metadata"])
+@app.get("/api/v1/body-types", tags=["Metadata"])
+def get_body_types(_: None = require_api_key):
+    body_types = sorted({car.body_type for car in validated_cars})
+    return {"count": len(body_types), "body_types": body_types}
+
+
+# ---------------------------------------------------------
+# GET ONE CAR
+# Register this after specific routes such as /search.
+# ---------------------------------------------------------
+
+@app.get("/api/cars/{car_id}", response_model=Car, tags=["Cars"])
+@app.get("/api/v1/cars/{car_id}", response_model=Car, tags=["Cars"])
+def get_car(
+    car_id: int,
+    _: None = require_api_key,
+):
+    for car in validated_cars:
+        if car.id == car_id:
+            return car
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Car with ID {car_id} was not found.",
+    )
